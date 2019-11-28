@@ -289,7 +289,8 @@ class Editor(LimitedCommandProgram):
         "write":_write,
         "backspace":_backspace,
         "replace":_replace,
-        "count":_count}
+        "count":_count,
+        "append":_append}
 
 class Calculator(LimitedCommandProgram):
     '''Arithmetic processing program'''
