@@ -6,11 +6,12 @@ import time, secrets, pathlib, urllib.request
 from decimal import Decimal, Context, localcontext, MAX_PREC, MAX_EMAX, MIN_EMIN, FloatOperation
 
 grammar = r"""
-program: line* //a program is zero or more lines
+program: line* command? //a program is one or more lines
 line: command_line | blank_line
 blank_line: newline //nothing, followed by a newline
-command_line: command_name space command_args newline //a command, plus args, plus newline
-    | command_name newline //no args; just command plus newline
+command_line: command newline
+command: command_name space command_args //a command, plus args
+    | command_name //no args; just command
 command_name: /\S+/  //One or more non-whitespace characters
 command_args: /[^\n\r]+/  //one or more characters that aren't line feeds or carriage returns
 space: / /+  //one or more spaces
@@ -20,20 +21,22 @@ newline: NEWLINE
 
 class TreeParser(Transformer):
     '''Turns a tree into an ordered list of commands
-    where each command is a tuple of (command_name, command_args),
-    both strings'''
+    where each command is a tuple of
+    (command_name, command_args), both strings'''
     def program(self, items):
         #None represents blank lines, which are filtered out
         return [item for item in items if item is not None]
     def line(self, items):
         (items,) = items
         return items
-    def command_line(self, items):
+    def command(self, items):
         command_name, *rest = items
         command_args = ""
-        if len(rest) == 3:
-            _, command_args, _ = rest
+        if len(rest) == 2:
+            _, command_args = rest
         return command_name, command_args
+    def command_line(self, items):
+        return items[0]
     def command_name(self, items):
         (item,) = items
         return str(item)
@@ -101,21 +104,37 @@ calculation_parser = Lark(
 class Interpreter:
     def __init__(self, code):
         if isinstance(code, str):
-            code = parser(code)
+            code = parse_logos(code)
         self.source = code
         self.remaining_code = self.source
-        self.runtime = Runtime()
+        self.runtime = Runtime(log_state=self.log_state)
         next(self.runtime)
-    def run_once(self):
-        (command, args), *self.remaining_code = self.remaining_code
+    def run_once(self, command_and_args=None):
+        if command_and_args is None:
+            (command, args), *self.remaining_code = self.remaining_code
+        else:
+            (command, args) = command_and_args
         if (remaining_code_changes := self.runtime.send((command, args))) is not None:
             self.remaining_code = remaining_code_changes(self.remaining_code)
         return
     def run_all(self):
-        i=0
         while self.remaining_code:
-            print(i:=i+1)
             self.run_once()
+    def repl_once(self):
+        self.run_all()
+        next_command = parse_logos(input(">>>> "))[0]
+        self.run_once(next_command)
+        state = self.most_recent_state
+        buffer = state.current_buffer
+        program_name = state.current_program_name
+        clipboard = state.clipboard
+        print(f"Clipboard: {clipboard}")
+        print(f"Buffer of {program_name}: {buffer}")
+    def repl(self):
+        while True:
+            self.repl_once()
+    def log_state(self, state):
+        self.most_recent_state = state
 
 def functional_command(func):
     @wraps(func)
@@ -248,7 +267,7 @@ class Editor(LimitedCommandProgram):
             unit = units[unit_string]
             number_to_backspace = int(number_string)
         #do the backspacing
-        for i in range(number_to_backspace):
+        for _ in range(number_to_backspace):
             while buffer and not any(
                 buffer.endswith(unit_component)
                 for unit_component
@@ -285,12 +304,52 @@ class Editor(LimitedCommandProgram):
         state.current_buffer += state.clipboard
         state.clipboard = ""
         return None, state
+    @functional_command
+    def _tailor(args, buffer):
+        """
+        Replace buffer with some number of units from end of buffer.
+        See _backspace for more info.
+        """
+        #logic to parse arguments for selection:
+        split_args = args.split(" ")
+        units = Editor.units
+        if all(split_arg == "" for split_arg in split_args):
+            number_to_select = 1
+            unit = units["characters"]
+        elif len(split_args) == 1:
+            if (string_arg := split_args[0]) in units:
+                number_to_select = 1
+                unit = units[string_arg]
+            else:
+                unit = units["characters"]
+                number_to_select = int(string_arg)
+        else:
+            number_string, unit_string = split_args
+            unit = units[unit_string]
+            number_to_select = int(number_string)
+        #replace buffer:
+        selection = ""
+        for _ in range(number_to_select):
+            while buffer and not any(
+                buffer.endswith(unit_component)
+                for unit_component
+                in unit):
+                    #pop characters,
+                    #until we get to a unit specifier
+                    *buffer, last_char = buffer
+                    selection = last_char + selection
+            #backspace the unit specifier
+            *buffer, last_char = buffer
+            selection = selection + last_char
+        buffer = selection
+        return buffer
     _commands = {
         "write":_write,
         "backspace":_backspace,
         "replace":_replace,
         "count":_count,
-        "append":_append}
+        "append":_append,
+        "tailor":_tailor}
 
 class Calculator(LimitedCommandProgram):
     '''Arithmetic processing program'''
@@ -330,7 +389,7 @@ class Terminal(LimitedCommandProgram):
         i.e. stop executing whatever was previously running,
         and instead run the buffer'''
         assert args == ""
-        new_instructions = parser.parse(state.current_buffer + "\n")
+        new_instructions = parse_logos(state.current_buffer)
         def replacer(old_instructions):
             return new_instructions
         state.clear_buffer()
@@ -519,7 +578,7 @@ class Assembler(LimitedCommandProgram):
     def _compile(args, state):
         program_name, *other_args = args.split()
         assert len(other_args) == 0
-        parsed = parser.parse(state.current_buffer + "\n")
+        parsed = parse_logos(state.current_buffer)
         name = ""
         commands = {'':[]}
         for command_line in parsed:
@@ -588,12 +647,12 @@ def switch(args, state):
     return None, state
 def name(args, state):
     assert args == ""
-    state.buffer = state.current_program_name
+    state.current_buffer = state.current_program_name
     return None, state
 def execute(args, state):
     if args != "" and not args.endswith(" "):
         args += " "
-    new_command_line = parser.parse(args + state.clipboard + "\n")
+    new_command_line = parse_logos(args + state.clipboard)
     remaining_code_changes = lambda current_code: [*new_command_line[:1], *current_code]
     return remaining_code_changes, state
 
@@ -608,7 +667,14 @@ KEYWORDS = {
 STANDARD_LIBRARY = {prog.name():prog for prog in programs}
 STANDARD_SANDBOX = {prog.name():prog for prog in safe_programs}
 
-def Runtime(initial_program=Desktop, library=STANDARD_LIBRARY, *args, **kwargs):
+def parse_logos(text):
+    text = str(text)
+    if text == "":
+        return []
+    else:
+        return parser.parse(text)
+
+def Runtime(initial_program=Desktop, library=STANDARD_LIBRARY, *args, log_state=None,  **kwargs):
     initial_current_program_name = initial_program.name()
     initial_library = library.copy()
     initial_program_instance = initial_program(*args, **kwargs)
@@ -622,12 +688,13 @@ def Runtime(initial_program=Desktop, library=STANDARD_LIBRARY, *args, **kwargs):
         remaining_code_changes = None
         while (command_tuple := (yield remaining_code_changes)) is not None:
             (command_name, command_args) = command_tuple
-            print(*command_tuple, sep=" - ")
             if command_name in KEYWORDS:
                 command = KEYWORDS[command_name]
             else:
                 command = state.current_program.get_command(command_name)
             remaining_code_changes, state = command(command_args, state)
+            if log_state is not None:
+                log_state(state)
     except Exception as e:
         error_message = (f"Error while interpreting. "
             f"{command_name=} {command_args=} {state=}")
@@ -635,30 +702,5 @@ def Runtime(initial_program=Desktop, library=STANDARD_LIBRARY, *args, **kwargs):
     return
 
 if __name__ == "__main__":
-    test = r"""
-rem Test Program
-Editor
-write "name hey"
-write
-write "minimise"
-write
-write "Email heya!"
-write
-write "send"
-write
-write "minimise"
-copy
-minimise
-Assembler
-paste
-compile Test
-minimise
-Test
-hey
-switch Email
-send
-"""
-    parsed_test = parser.parse(test)
-    print(f"{parsed_test=}")
-    running = Interpreter(parsed_test)
-    running.run_all()
+    running = Interpreter([])
+    running.repl()
