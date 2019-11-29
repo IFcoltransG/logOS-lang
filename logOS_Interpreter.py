@@ -218,14 +218,16 @@ class Editor(LimitedCommandProgram):
     '''Text editor, themed around Notepad or WordPad'''
     #units dict gives separator for the unit e.g. lines separated by \n
     units = {"characters":("",), "words":(" ","\n"), "lines":("\n",)}
-    @staticmethod
-    def unit_split(string, delimiters):
+    quotemarks = {"quotemark", "a quotemark", "Otto von Quotemark"}
+    newlines = {"newline", "a newline"}
+    @classmethod
+    def unit_split(cls, string, delimiters):
         if len(delimiters) == 0:
             return [string]
         if "" in delimiters:
             return list(string)
         *other_delimiters, last_delimiter = delimiters
-        split_by_others = Editor.unit_split(string, other_delimiters)
+        split_by_others = cls.unit_split(string, other_delimiters)
         nested_splits = [
             subsplit.split(last_delimiter)
             for subsplit
@@ -235,15 +237,30 @@ class Editor(LimitedCommandProgram):
             for top_level_part in nested_splits
             for inner_part in top_level_part]
         return flattened_splits
+    @classmethod
+    def extract_replacement(cls, string):
+        string = string.strip()
+        if string in cls.quotemarks:
+            return '"'
+        if string in cls.newlines:
+            return "\n"
+        if len(string) < 2:
+            return None
+        if string.startswith('"') and string.endswith('"'):
+            return string[1:-1]
+        return None
     @functional_command
     def _write(args, buffer):
         '''Append args to buffer (to end of buffer)'''
         args = args.strip()
-        if args == "":
+        if args in {"", "newline", "a newline"}:
             buffer += "\n"
             return buffer
+        if args in {'"', "quotemark", "a quotemark"}:
+            buffer += '"'
+            return buffer
         assert args.startswith('"') and args.endswith('"')
-        buffer += args.strip('"')
+        buffer += args[1:-1]
         return buffer
     @functional_command
     def _backspace(args, buffer):
@@ -278,11 +295,22 @@ class Editor(LimitedCommandProgram):
         return buffer
     @functional_command
     def _replace(args, buffer):
-        assert args.count('"') == 4
-        initial_empty, first, middle, second, final_empty = args.split('"')
-        assert initial_empty.strip() == final_empty.strip() == ""
-        assert middle.strip() == "with"
-        buffer = buffer.replace(first, second)
+        sep = " with "
+        extract = Editor.extract_replacement
+        #try parse from front:
+        first, *rest = args.split(sep)
+        #iterate through every interpretation of symbols
+        while (extract(first) is None
+               or extract(sep.join(rest)) is None):
+            if not rest:
+                msg = args + " can't be parsed as replacement"
+                raise ValueError(msg)
+            second_first, *rest = rest
+            first += sep + second_first
+        last = sep.join(rest)
+        a = Editor.extract_replacement(first)
+        b = Editor.extract_replacement(last)
+        buffer = buffer.replace(a, b)
         return buffer
     @functional_command
     def _count(args, buffer):
@@ -328,20 +356,29 @@ class Editor(LimitedCommandProgram):
             unit = units[unit_string]
             number_to_select = int(number_string)
         #replace buffer:
-        selection = ""
+        selection = selection_plus_spec = ""
         for _ in range(number_to_select):
+            print(f"{selection=} {selection_plus_spec=}")
+            selection = selection_plus_spec
             while buffer and not any(
-                buffer.endswith(unit_component)
+                "".join(buffer).endswith(unit_component)
                 for unit_component
                 in unit):
                     #pop characters,
                     #until we get to a unit specifier
                     *buffer, last_char = buffer
                     selection = last_char + selection
-            #backspace the unit specifier
-            *buffer, last_char = buffer
-            selection = selection + last_char
+            selection_plus_spec = selection
+            print(selection)
+            while buffer and any(
+                "".join(buffer).endswith(unit_component)
+                for unit_component
+                in unit):
+                #extract the unit specifier
+                *buffer, last_char = buffer
+                selection_plus_spec = last_char + selection
         buffer = selection
+        print(selection, selection_plus_spec)
         return buffer
     _commands = {
         "write":_write,
