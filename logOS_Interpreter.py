@@ -308,8 +308,8 @@ class Editor(LimitedCommandProgram):
             second_first, *rest = rest
             first += sep + second_first
         last = sep.join(rest)
-        a = Editor.extract_replacement(first)
-        b = Editor.extract_replacement(last)
+        a = extract(first)
+        b = extract(last)
         buffer = buffer.replace(a, b)
         return buffer
     @functional_command
