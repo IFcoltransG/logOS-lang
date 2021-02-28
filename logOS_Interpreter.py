@@ -102,18 +102,23 @@ calculation_parser = Lark(
     transformer=CalculationTreeParser)
 
 class Interpreter:
-    def __init__(self, code):
+    def __init__(self, code, **kwargs):
         if isinstance(code, str):
             code = parse_logos(code)
+        if "log_state" not in kwargs:
+            kwargs["log_state"] = self.log_state
         self.source = code
         self.remaining_code = self.source
-        self.runtime = Runtime(log_state=self.log_state)
+        self.runtime = Runtime(**kwargs)
+        self.history = []
+        self.repl_history = []
         next(self.runtime)
     def run_once(self, command_and_args=None):
         if command_and_args is None:
             (command, args), *self.remaining_code = self.remaining_code
         else:
             (command, args) = command_and_args
+        self.history.append((command, args))
         if (remaining_code_changes := self.runtime.send((command, args))) is not None:
             self.remaining_code = remaining_code_changes(self.remaining_code)
         return
@@ -123,6 +128,7 @@ class Interpreter:
     def repl_once(self):
         self.run_all()
         next_command = parse_logos(input(">>>> "))[0]
+        self.repl_history.append(next_command)
         self.run_once(next_command)
         state = self.most_recent_state
         buffer = state.current_buffer
@@ -161,7 +167,7 @@ class BaseProgram:
         return cls.__name__
 
 class LimitedCommandProgram(BaseProgram):
-    '''Base class for programs that can't accept arguments, only a limited set'''
+    '''Base class for programs that can't accept all arguments, only a limited set'''
     def get_command(self, command_name):
         return self._commands[command_name]
 
@@ -602,6 +608,40 @@ class Solitaire(LimitedCommandProgram):
     _commands = {"sort":_sort}
 
 class Assembler(LimitedCommandProgram):
+    '''Used for creating program objects from a class'''
+    def _compile(args, state):
+        program_name, *other_args = args.split()
+        assert len(other_args) == 0
+        parsed = parse_logos(state.current_buffer)
+        name = ""
+        commands = {'':[]}
+        for command_line in parsed:
+            command, parsed_args = command_line
+            if command == "name" and parsed_args != "":
+                name = parsed_args
+            else:
+                try:
+                    commands[name].append(command_line)
+                except KeyError:
+                    commands[name] = [command_line]
+        
+        return None, state
+    _commands = {"compile":_compile}
+
+class ProxyProgram(BaseProgram):
+    def __init__(self, name, commands, vm_library):
+        self.name = lambda: name
+        self.interpreter = Interpreter([],
+                                       library=vm_library,
+                                       redirect_Email=PLACEHOLDER)
+        self._commands = commands
+    def get_command(self, command_name):
+        code = self._commands[command_name]
+        
+
+"""
+class Assembler(LimitedCommandProgram):
+    '''Used for creating program objects from a class'''
     @staticmethod
     def create_get_command(commands):
         def command_getter(self, command_name):
@@ -631,7 +671,50 @@ class Assembler(LimitedCommandProgram):
         new_program = type(program_name, (LimitedCommandProgram,), class_dict)
         state.library = {program_name: new_program, **state.library}
         return None, state
+    def _compile2(args, state):
+        program_name, *other_args = args.split()
+        assert len(other_args) == 0
+        parsed = parse_logos(state.current_buffer)
+        name = ""
+        commands = {'':[]}
+        for command_line in parsed:
+            command, parsed_args = command_line
+            if command == "name" and parsed_args != "":
+                name = parsed_args
+            else:
+                try:
+                    commands[name].append(command_line)
+                except KeyError:
+                    commands[name] = [command_line]
+        class_dict = {"get_command":Assembler.create_get_command(commands)}
+        new_program = type(program_name, (LimitedCommandProgram,), class_dict)
+        vm_lib = state.library.copy()
+        
+        return None, state
     _commands = {"compile":_compile}
+
+class FauxProgramCreator(type):
+    def __new__(cls, program_name, vm_lib):
+        vm = Interpreter(library=vm_lib)
+        class_dict = {"get_command":FauxProgramCreator.create_get_command(commands, vm)}
+        program = type(program_name, (LimitedCommandProgram,), )
+    @staticmethod
+    def create_get_command(commands, vm):
+        def getter_command(self, command_name):
+            code = commands.get(command_name, commands['']).copy()
+            if not code:
+                raise RuntimeError("Command not defined in assembled program")
+            def command_itself(args, state):
+                while code:
+                    
+                return None, state
+            return command_itself
+        return getter_command
+
+class BaseEmailIOManager:
+    def print(*args, **kwargs
+"""
+
 
 @dataclass
 class RuntimeState:
@@ -711,7 +794,7 @@ def parse_logos(text):
     else:
         return parser.parse(text)
 
-def Runtime(initial_program=Desktop, library=STANDARD_LIBRARY, *args, log_state=None,  **kwargs):
+def Runtime(initial_program=Desktop, library=STANDARD_LIBRARY, *args, log_state=None, redirect_Email=None,  **kwargs):
     initial_current_program_name = initial_program.name()
     initial_library = library.copy()
     initial_program_instance = initial_program(*args, **kwargs)
